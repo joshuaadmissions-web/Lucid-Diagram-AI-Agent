@@ -29,11 +29,13 @@
   "license": "ISC",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@types/node": "^22.0.0",
     "axios": "^1.7.0",
     "typescript": "^5.7.0"
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1"
   }
 }

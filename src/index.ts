@@ -1696,7 +1696,13 @@ const isCLI = process.argv[1] === process.argv[1] && process.argv.length > 1;
 if (isCLI && process.argv[2]) {
   // CLI mode
   const cli = new CLI();
-  cli.run(process.argv.slice(2)).catch(console.error);
+  
+  // If only repo URL is provided (no command), default to full analysis + diagram
+  if (process.argv.length === 3 && !['analyze', 'diagram', 'full', 'json', 'help'].includes(process.argv[2])) {
+    cli.run(['full', process.argv[2], 'architecture']).catch(console.error);
+  } else {
+    cli.run(process.argv.slice(2)).catch(console.error);
+  }
 } else {
   // MCP server mode
   const server = new LucidDiagramAgentServer();
