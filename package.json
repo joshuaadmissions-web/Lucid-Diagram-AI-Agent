@@ -1,15 +1,30 @@
 {
   "name": "lucid-diagram-agent",
-  "version": "1.0.0",
-  "description": "MCP server that analyzes GitHub repositories and generates architecture diagrams in Lucid Charts",
+  "version": "2.0.0",
+  "description": "AI agent that analyzes GitHub repositories and generates architecture diagrams in Lucid Charts",
   "main": "build/index.js",
   "type": "module",
-  "scripts": {
-    "build": "tsc && chmod +x build/index.js",
-    "start": "node build/index.js",
-    "dev": "tsc --watch"
+  "bin": {
+    "lucid-diagram": "./build/index.js"
   },
-  "keywords": ["lucid", "diagram", "mcp", "github", "architecture"],
+  "scripts": {
+    "build": "tsc",
+    "start": "node build/index.js",
+    "dev": "tsc --watch",
+    "analyze": "node build/index.js analyze",
+    "diagram": "node build/index.js diagram",
+    "test": "node build/index.js analyze facebook/react"
+  },
+  "keywords": [
+    "lucid",
+    "diagram",
+    "mcp",
+    "github",
+    "architecture",
+    "ai-agent",
+    "visualization",
+    "documentation"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
@@ -17,5 +32,8 @@
     "@types/node": "^22.0.0",
     "axios": "^1.7.0",
     "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }

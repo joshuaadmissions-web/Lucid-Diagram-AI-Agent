@@ -8,6 +8,8 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import axios from 'axios';
+import * as fs from 'fs';
+import * as path from 'path';
 
 // ============================================================
 // Types
@@ -22,6 +24,9 @@ interface RepoInfo {
   default_branch: string;
   stars: number;
   forks: number;
+  size: number;
+  created_at: string;
+  updated_at: string;
 }
 
 interface RepoContent {
@@ -44,6 +49,7 @@ interface FileAnalysis {
   exports: string[];
   classes: string[];
   functions: string[];
+  size: number;
 }
 
 interface RepoAnalysis {
@@ -57,6 +63,12 @@ interface RepoAnalysis {
     type: string;
     framework: string;
     description: string;
+    patterns: string[];
+  };
+  stats: {
+    totalFiles: number;
+    totalLines: number;
+    avgFileSize: number;
   };
 }
 
@@ -70,6 +82,7 @@ interface LucidShape {
   height: number;
   fillColor?: string;
   strokeColor?: string;
+  fontSize?: number;
 }
 
 interface LucidLine {
@@ -77,12 +90,18 @@ interface LucidLine {
   startShapeId: string;
   endShapeId: string;
   text?: string;
+  lineStyle?: string;
 }
 
 interface LucidDocument {
   title: string;
   shapes: LucidShape[];
   lines: LucidLine[];
+  metadata?: {
+    generatedAt: string;
+    repoUrl: string;
+    diagramType: string;
+  };
 }
 
 // ============================================================
@@ -94,6 +113,8 @@ const LUCID_API_BASE = 'https://api.lucid.co';
 
 const LUCID_API_KEY = process.env.LUCID_API_KEY || '';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
+const MAX_FILES_TO_ANALYZE = 50;
+const MAX_DEPENDENCIES_TO_SHOW = 15;
 
 // ============================================================
 // GitHub Analyzer
@@ -101,11 +122,12 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 
 class GitHubAnalyzer {
   private axiosInstance;
+  private cache: Map<string, any> = new Map();
 
   constructor() {
     const headers: Record<string, string> = {
       'Accept': 'application/vnd.github.v3+json',
-      'User-Agent': 'lucid-diagram-agent/1.0',
+      'User-Agent': 'lucid-diagram-agent/2.0',
     };
     if (GITHUB_TOKEN) {
       headers['Authorization'] = `Bearer ${GITHUB_TOKEN}`;
@@ -113,6 +135,7 @@ class GitHubAnalyzer {
     this.axiosInstance = axios.create({
       baseURL: GITHUB_API_BASE,
       headers,
+      timeout: 30000,
     });
   }
 
@@ -131,8 +154,23 @@ class GitHubAnalyzer {
     return { owner: match[1], repo: match[2] };
   }
 
+  private getCacheKey(endpoint: string): string {
+    return endpoint;
+  }
+
+  private async getWithCache<T>(endpoint: string): Promise<T> {
+    const cacheKey = this.getCacheKey(endpoint);
+    if (this.cache.has(cacheKey)) {
+      return this.cache.get(cacheKey);
+    }
+
+    const { data } = await this.axiosInstance.get(endpoint);
+    this.cache.set(cacheKey, data);
+    return data;
+  }
+
   async getRepoInfo(owner: string, repo: string): Promise<RepoInfo> {
-    const { data } = await this.axiosInstance.get(`/repos/${owner}/${repo}`);
+    const data = await this.getWithCache<any>(`/repos/${owner}/${repo}`);
     return {
       name: data.name,
       full_name: data.full_name,
@@ -142,11 +180,14 @@ class GitHubAnalyzer {
       default_branch: data.default_branch,
       stars: data.stargazers_count,
       forks: data.forks_count,
+      size: data.size,
+      created_at: data.created_at,
+      updated_at: data.updated_at,
     };
   }
 
   async getLanguages(owner: string, repo: string): Promise<Record<string, number>> {
-    const { data } = await this.axiosInstance.get(`/repos/${owner}/${repo}/languages`);
+    const data = await this.getWithCache<any>(`/repos/${owner}/${repo}/languages`);
     return data;
   }
 
@@ -186,7 +227,7 @@ class GitHubAnalyzer {
     const depFiles = [
       'package.json', 'requirements.txt', 'Cargo.toml', 'go.mod',
       'Gemfile', 'pom.xml', 'build.gradle', 'CMakeLists.txt',
-      'composer.json', 'Pipfile', 'pyproject.toml', 'Cargo.toml'
+      'composer.json', 'Pipfile', 'pyproject.toml'
     ];
 
     for (const file of depFiles) {
@@ -234,6 +275,17 @@ class GitHubAnalyzer {
             deps.push({ name: parts[0].trim(), version: parts[1]?.trim().replace(/["\s]/g, '') || '*', type: 'production' });
           }
         }
+      } else if (filename === 'go.mod') {
+        const lines = content.split('\n');
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed && !trimmed.startsWith('//') && !trimmed.startsWith('module')) {
+            const parts = trimmed.split(/\s+/);
+            if (parts.length >= 2) {
+              deps.push({ name: parts[0], version: parts[1], type: 'production' });
+            }
+          }
+        }
       }
     } catch {
       // Skip unparseable files
@@ -251,6 +303,7 @@ class GitHubAnalyzer {
       'js': 'JavaScript', 'jsx': 'JavaScript', 'ts': 'TypeScript', 'tsx': 'TypeScript',
       'py': 'Python', 'java': 'Java', 'rb': 'Ruby', 'go': 'Go', 'rs': 'Rust',
       'php': 'PHP', 'swift': 'Swift', 'kt': 'Kotlin', 'scala': 'Scala',
+      'c': 'C', 'cpp': 'C++', 'h': 'C/C++ Header', 'cs': 'C#',
     };
     const language = languageMap[ext] || ext;
 
@@ -265,6 +318,8 @@ class GitHubAnalyzer {
       /from\s+['"]([^'"]+)['"]/g,
       /require\(['"]([^'"]+)['"]\)/g,
       /import\s+([^\s;]+)/g,
+      /use\s+crate\s+::\s*([^;]+)/g,
+      /#include\s+[<"]([^>"]+)[>"]/g,
     ];
     for (const regex of importRegexes) {
       let match;
@@ -278,6 +333,7 @@ class GitHubAnalyzer {
       /export\s+(?:default\s+)?(?:function|class|const|let|var)\s+(\w+)/g,
       /module\.exports\s*=\s*(\w+)/g,
       /def\s+(\w+)/g,
+      /pub\s+(?:fn|struct|enum|trait)\s+(\w+)/g,
     ];
     for (const regex of exportRegexes) {
       let match;
@@ -290,6 +346,8 @@ class GitHubAnalyzer {
     const classRegexes = [
       /(?:export\s+)?(?:abstract\s+)?class\s+(\w+)/g,
       /class\s+(\w+)/g,
+      /pub\s+struct\s+(\w+)/g,
+      /pub\s+enum\s+(\w+)/g,
     ];
     for (const regex of classRegexes) {
       let match;
@@ -305,6 +363,7 @@ class GitHubAnalyzer {
       /def\s+(\w+)/g,
       /func\s+(\w+)/g,
       /fn\s+(\w+)/g,
+      /pub\s+fn\s+(\w+)/g,
     ];
     for (const regex of funcRegexes) {
       let match;
@@ -320,6 +379,7 @@ class GitHubAnalyzer {
       exports: [...new Set(exports)],
       classes: [...new Set(classes)],
       functions: [...new Set(functions)],
+      size: content.length,
     };
   }
 
@@ -335,72 +395,101 @@ class GitHubAnalyzer {
     const structure = await this.getRepoContents(owner, repo);
     
     // Analyze key files
-    const keyPaths = ['src', 'lib', 'app', 'server', 'client', 'backend', 'frontend'];
+    const keyPaths = ['src', 'lib', 'app', 'server', 'client', 'backend', 'frontend', 'pkg', 'cmd'];
     const keyFiles: FileAnalysis[] = [];
     const entryPoints: string[] = [];
+    let totalLines = 0;
 
     // Check common entry points
     const entryCandidates = [
       'index.js', 'index.ts', 'app.js', 'app.ts', 'main.js', 'main.ts',
       'server.js', 'server.ts', 'index.py', 'main.py', 'app.py',
-      'main.go', 'main.rs', 'lib.rs', 'index.html',
+      'main.go', 'main.rs', 'lib.rs', 'index.html', 'main.cpp', 'main.c',
     ];
 
     for (const file of structure) {
       if (file.type === 'file' && entryCandidates.includes(file.name)) {
         entryPoints.push(file.path);
         const analysis = await this.analyzeFile(owner, repo, file.path);
-        if (analysis) keyFiles.push(analysis);
-      }
-    }
-
-    // Analyze key directories
-    for (const dir of keyPaths) {
-      const dirContent = await this.getRepoContents(owner, repo, dir);
-      for (const item of dirContent.slice(0, 15)) {
-        if (item.type === 'file') {
-          const analysis = await this.analyzeFile(owner, repo, item.path);
-          if (analysis) keyFiles.push(analysis);
+        if (analysis) {
+          keyFiles.push(analysis);
+          totalLines += analysis.size;
         }
       }
     }
 
-    // Determine architecture type
+    // Analyze key directories
+    let filesAnalyzed = 0;
+    for (const dir of keyPaths) {
+      if (filesAnalyzed >= MAX_FILES_TO_ANALYZE) break;
+      const dirContent = await this.getRepoContents(owner, repo, dir);
+      for (const item of dirContent.slice(0, 15)) {
+        if (filesAnalyzed >= MAX_FILES_TO_ANALYZE) break;
+        if (item.type === 'file') {
+          const analysis = await this.analyzeFile(owner, repo, item.path);
+          if (analysis) {
+            keyFiles.push(analysis);
+            totalLines += analysis.size;
+            filesAnalyzed++;
+          }
+        }
+      }
+    }
+
+    // Determine architecture type and patterns
     const allDeps = dependencies.map(d => d.name.toLowerCase());
     const allImports = keyFiles.flatMap(f => f.imports.map(i => i.toLowerCase()));
     const allContext = [...allDeps, ...allImports];
 
     let archType = 'Monolithic';
     let framework = 'Unknown';
-    let archDescription = '';
+    const patterns: string[] = [];
 
+    // Detect architecture patterns
     if (allContext.some(d => d.includes('react') || d.includes('vue') || d.includes('angular'))) {
       if (allContext.some(d => d.includes('next'))) {
         archType = 'Full-Stack Framework';
         framework = 'Next.js';
+        patterns.push('SSR/SSG', 'React');
       } else if (allContext.some(d => d.includes('express') || d.includes('fastify'))) {
         archType = 'Full-Stack (Frontend + API)';
         framework = allContext.find(d => d.includes('react')) ? 'React + Express' : 'Frontend Framework + API';
+        patterns.push('REST API', 'SPA');
       } else {
         archType = 'SPA (Single Page Application)';
         framework = allContext.find(d => d.includes('react')) ? 'React' :
                     allContext.find(d => d.includes('vue')) ? 'Vue.js' : 'Angular';
+        patterns.push('Client-side rendering');
       }
     } else if (allContext.some(d => d.includes('express') || d.includes('koa') || d.includes('fastify'))) {
       archType = 'API Server';
       framework = allContext.find(d => d.includes('express')) ? 'Express.js' :
                   allContext.find(d => d.includes('fastify')) ? 'Fastify' : 'Koa.js';
+      patterns.push('REST API', 'Middleware');
     } else if (allContext.some(d => d.includes('django') || d.includes('flask') || d.includes('fastapi'))) {
       archType = 'Web Framework';
       framework = allContext.find(d => d.includes('django')) ? 'Django' :
                   allContext.find(d => d.includes('fastapi')) ? 'FastAPI' : 'Flask';
+      patterns.push('MVC', 'ORM');
     } else if (allContext.some(d => d.includes('spring') || d.includes('jakarta'))) {
       archType = 'Enterprise Application';
       framework = 'Spring Boot';
+      patterns.push('Dependency Injection', 'MVC');
     } else if (allContext.some(d => d.includes('tensorflow') || d.includes('pytorch') || d.includes('keras'))) {
       archType = 'Machine Learning';
       framework = allContext.find(d => d.includes('tensorflow')) ? 'TensorFlow' : 'PyTorch';
+      patterns.push('Neural Networks', 'Data Pipeline');
+    } else if (allContext.some(d => d.includes('docker') || d.includes('kubernetes'))) {
+      patterns.push('Containerization', 'Microservices');
     }
+
+    // Detect additional patterns
+    if (allContext.some(d => d.includes('graphql'))) patterns.push('GraphQL');
+    if (allContext.some(d => d.includes('mongodb') || d.includes('mongoose'))) patterns.push('NoSQL');
+    if (allContext.some(d => d.includes('postgres') || d.includes('mysql'))) patterns.push('SQL Database');
+    if (allContext.some(d => d.includes('redis'))) patterns.push('Caching');
+    if (allContext.some(d => d.includes('websocket') || d.includes('socket.io'))) patterns.push('WebSockets');
+    if (allContext.some(d => d.includes('grpc') || d.includes('protobuf'))) patterns.push('gRPC');
 
     const langSummary = Object.entries(languages)
       .sort(([, a], [, b]) => b - a)
@@ -408,7 +497,7 @@ class GitHubAnalyzer {
       .map(([lang, bytes]) => `${lang} (${(bytes / Object.values(languages).reduce((a, b) => a + b, 0) * 100).toFixed(1)}%)`)
       .join(', ');
 
-    archDescription = `${repoInfo.name} is a ${archType.toLowerCase()} project built primarily with ${langSummary}. `;
+    let archDescription = `${repoInfo.name} is a ${archType.toLowerCase()} project built primarily with ${langSummary}. `;
     if (dependencies.length > 0) {
       archDescription += `It has ${dependencies.filter(d => d.type === 'production').length} production dependencies and ${dependencies.filter(d => d.type === 'development').length} dev dependencies. `;
     }
@@ -427,6 +516,12 @@ class GitHubAnalyzer {
         type: archType,
         framework,
         description: archDescription,
+        patterns,
+      },
+      stats: {
+        totalFiles: structure.length,
+        totalLines,
+        avgFileSize: totalLines / Math.max(keyFiles.length, 1),
       },
     };
   }
@@ -446,6 +541,7 @@ class LucidDiagramGenerator {
         'Authorization': `Bearer ${LUCID_API_KEY}`,
         'Content-Type': 'application/json',
       },
+      timeout: 30000,
     });
   }
 
@@ -453,7 +549,7 @@ class LucidDiagramGenerator {
     const shapes: LucidShape[] = [];
     const lines: LucidLine[] = [];
     let shapeId = 0;
-    const shapeMap = new Map<string, string>(); // name -> id
+    const shapeMap = new Map<string, string>();
 
     const nextId = () => `shape_${shapeId++}`;
     const COLORS = {
@@ -463,6 +559,7 @@ class LucidDiagramGenerator {
       arch: '#FFD700',
       entry: '#9B59B6',
       module: '#00CED1',
+      pattern: '#FFA500',
     };
 
     // Title / Repo box
@@ -471,13 +568,14 @@ class LucidDiagramGenerator {
     shapes.push({
       id: repoId,
       type: 'Rectangle',
-      text: `📦 ${analysis.repo.name}\n${analysis.repo.description?.substring(0, 60) || ''}`,
-      x: 300,
+      text: `📦 ${analysis.repo.name}\n${analysis.repo.description?.substring(0, 80) || 'No description'}`,
+      x: 350,
       y: 20,
       width: 400,
       height: 80,
       fillColor: COLORS.repo,
       strokeColor: '#2C5F8A',
+      fontSize: 14,
     });
 
     // Architecture type box
@@ -486,13 +584,14 @@ class LucidDiagramGenerator {
     shapes.push({
       id: archId,
       type: 'Rectangle',
-      text: `🏗️ Architecture: ${analysis.architecture.type}\nFramework: ${analysis.architecture.framework}`,
-      x: 300,
+      text: `🏗️ ${analysis.architecture.type}\nFramework: ${analysis.architecture.framework}`,
+      x: 350,
       y: 120,
       width: 400,
       height: 70,
       fillColor: COLORS.arch,
       strokeColor: '#B8960F',
+      fontSize: 13,
     });
 
     lines.push({
@@ -518,6 +617,7 @@ class LucidDiagramGenerator {
       height: 40,
       fillColor: COLORS.lang,
       strokeColor: '#2E8B57',
+      fontSize: 12,
     });
 
     lines.push({
@@ -540,6 +640,7 @@ class LucidDiagramGenerator {
         height: 35,
         fillColor: COLORS.lang,
         strokeColor: '#2E8B57',
+        fontSize: 11,
       });
       lines.push({
         id: `line_${shapeId++}`,
@@ -549,8 +650,8 @@ class LucidDiagramGenerator {
     });
 
     // Dependencies section
-    const prodDeps = analysis.dependencies.filter(d => d.type === 'production').slice(0, 8);
-    const devDeps = analysis.dependencies.filter(d => d.type === 'development').slice(0, 4);
+    const prodDeps = analysis.dependencies.filter(d => d.type === 'production').slice(0, MAX_DEPENDENCIES_TO_SHOW);
+    const devDeps = analysis.dependencies.filter(d => d.type === 'development').slice(0, 5);
 
     if (prodDeps.length > 0) {
       const depsTitleId = nextId();
@@ -564,6 +665,7 @@ class LucidDiagramGenerator {
         height: 40,
         fillColor: COLORS.deps,
         strokeColor: '#CC4444',
+        fontSize: 12,
       });
 
       lines.push({
@@ -584,6 +686,7 @@ class LucidDiagramGenerator {
           height: 30,
           fillColor: dep.type === 'production' ? COLORS.deps : '#FFA07A',
           strokeColor: '#CC4444',
+          fontSize: 10,
         });
         lines.push({
           id: `line_${shapeId++}`,
@@ -606,6 +709,7 @@ class LucidDiagramGenerator {
         height: 40,
         fillColor: COLORS.entry,
         strokeColor: '#7B1FA2',
+        fontSize: 12,
       });
 
       lines.push({
@@ -626,6 +730,7 @@ class LucidDiagramGenerator {
           height: 30,
           fillColor: COLORS.entry,
           strokeColor: '#7B1FA2',
+          fontSize: 10,
         });
         lines.push({
           id: `line_${shapeId++}`,
@@ -649,6 +754,7 @@ class LucidDiagramGenerator {
         height: 40,
         fillColor: COLORS.module,
         strokeColor: '#008B8B',
+        fontSize: 12,
       });
 
       lines.push({
@@ -670,6 +776,7 @@ class LucidDiagramGenerator {
           height: 50,
           fillColor: COLORS.module,
           strokeColor: '#008B8B',
+          fontSize: 10,
         });
         lines.push({
           id: `line_${shapeId++}`,
@@ -679,10 +786,357 @@ class LucidDiagramGenerator {
       });
     }
 
+    // Architecture patterns
+    if (analysis.architecture.patterns.length > 0) {
+      const patternTitleId = nextId();
+      shapes.push({
+        id: patternTitleId,
+        type: 'Rectangle',
+        text: '🎯 Design Patterns',
+        x: 350,
+        y: 220,
+        width: 200,
+        height: 40,
+        fillColor: COLORS.pattern,
+        strokeColor: '#CC8400',
+        fontSize: 12,
+      });
+
+      lines.push({
+        id: `line_${shapeId++}`,
+        startShapeId: archId,
+        endShapeId: patternTitleId,
+      });
+
+      analysis.architecture.patterns.slice(0, 5).forEach((pattern, i) => {
+        const patternId = nextId();
+        shapes.push({
+          id: patternId,
+          type: 'Rectangle',
+          text: pattern,
+          x: 350,
+          y: 270 + i * 40,
+          width: 200,
+          height: 35,
+          fillColor: COLORS.pattern,
+          strokeColor: '#CC8400',
+          fontSize: 11,
+        });
+        lines.push({
+          id: `line_${shapeId++}`,
+          startShapeId: patternTitleId,
+          endShapeId: patternId,
+        });
+      });
+    }
+
     return {
       title: `${analysis.repo.name} - Architecture Diagram`,
       shapes,
       lines,
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        repoUrl: analysis.repo.full_name,
+        diagramType: 'architecture',
+      },
+    };
+  }
+
+  generateDependencyDiagram(analysis: RepoAnalysis): LucidDocument {
+    const shapes: LucidShape[] = [];
+    const lines: LucidLine[] = [];
+    let shapeId = 0;
+
+    const nextId = () => `shape_${shapeId++}`;
+
+    // Title
+    const titleId = nextId();
+    shapes.push({
+      id: titleId,
+      type: 'Rectangle',
+      text: `📦 ${analysis.repo.name} - Dependencies`,
+      x: 350,
+      y: 20,
+      width: 400,
+      height: 60,
+      fillColor: '#4A90D9',
+      strokeColor: '#2C5F8A',
+      fontSize: 16,
+    });
+
+    // Group dependencies by type
+    const prodDeps = analysis.dependencies.filter(d => d.type === 'production').slice(0, 12);
+    const devDeps = analysis.dependencies.filter(d => d.type === 'development').slice(0, 6);
+
+    // Production dependencies
+    if (prodDeps.length > 0) {
+      const prodTitleId = nextId();
+      shapes.push({
+        id: prodTitleId,
+        type: 'Rectangle',
+        text: 'Production Dependencies',
+        x: 50,
+        y: 120,
+        width: 300,
+        height: 40,
+        fillColor: '#FF6B6B',
+        strokeColor: '#CC4444',
+        fontSize: 13,
+      });
+
+      lines.push({
+        id: `line_${shapeId++}`,
+        startShapeId: titleId,
+        endShapeId: prodTitleId,
+      });
+
+      prodDeps.forEach((dep, i) => {
+        const depId = nextId();
+        shapes.push({
+          id: depId,
+          type: 'Rectangle',
+          text: `${dep.name}\n${dep.version}`,
+          x: 50,
+          y: 170 + i * 50,
+          width: 300,
+          height: 45,
+          fillColor: '#FF6B6B',
+          strokeColor: '#CC4444',
+          fontSize: 11,
+        });
+        lines.push({
+          id: `line_${shapeId++}`,
+          startShapeId: prodTitleId,
+          endShapeId: depId,
+        });
+      });
+    }
+
+    // Development dependencies
+    if (devDeps.length > 0) {
+      const devTitleId = nextId();
+      shapes.push({
+        id: devTitleId,
+        type: 'Rectangle',
+        text: 'Development Dependencies',
+        x: 450,
+        y: 120,
+        width: 300,
+        height: 40,
+        fillColor: '#FFA07A',
+        strokeColor: '#CC4444',
+        fontSize: 13,
+      });
+
+      lines.push({
+        id: `line_${shapeId++}`,
+        startShapeId: titleId,
+        endShapeId: devTitleId,
+      });
+
+      devDeps.forEach((dep, i) => {
+        const depId = nextId();
+        shapes.push({
+          id: depId,
+          type: 'Rectangle',
+          text: `${dep.name}\n${dep.version}`,
+          x: 450,
+          y: 170 + i * 50,
+          width: 300,
+          height: 45,
+          fillColor: '#FFA07A',
+          strokeColor: '#CC4444',
+          fontSize: 11,
+        });
+        lines.push({
+          id: `line_${shapeId++}`,
+          startShapeId: devTitleId,
+          endShapeId: depId,
+        });
+      });
+    }
+
+    return {
+      title: `${analysis.repo.name} - Dependencies`,
+      shapes,
+      lines,
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        repoUrl: analysis.repo.full_name,
+        diagramType: 'dependencies',
+      },
+    };
+  }
+
+  generateComponentDiagram(analysis: RepoAnalysis): LucidDocument {
+    const shapes: LucidShape[] = [];
+    const lines: LucidLine[] = [];
+    let shapeId = 0;
+
+    const nextId = () => `shape_${shapeId++}`;
+
+    // Title
+    const titleId = nextId();
+    shapes.push({
+      id: titleId,
+      type: 'Rectangle',
+      text: `🧩 ${analysis.repo.name} - Components`,
+      x: 350,
+      y: 20,
+      width: 400,
+      height: 60,
+      fillColor: '#00CED1',
+      strokeColor: '#008B8B',
+      fontSize: 16,
+    });
+
+    // Entry points as components
+    if (analysis.entryPoints.length > 0) {
+      const epTitleId = nextId();
+      shapes.push({
+        id: epTitleId,
+        type: 'Rectangle',
+        text: 'Entry Points',
+        x: 50,
+        y: 120,
+        width: 250,
+        height: 40,
+        fillColor: '#9B59B6',
+        strokeColor: '#7B1FA2',
+        fontSize: 13,
+      });
+
+      lines.push({
+        id: `line_${shapeId++}`,
+        startShapeId: titleId,
+        endShapeId: epTitleId,
+      });
+
+      analysis.entryPoints.forEach((ep, i) => {
+        const epId = nextId();
+        shapes.push({
+          id: epId,
+          type: 'Rectangle',
+          text: ep.split('/').pop() || ep,
+          x: 50,
+          y: 170 + i * 50,
+          width: 250,
+          height: 45,
+          fillColor: '#9B59B6',
+          strokeColor: '#7B1FA2',
+          fontSize: 11,
+        });
+        lines.push({
+          id: `line_${shapeId++}`,
+          startShapeId: epTitleId,
+          endShapeId: epId,
+        });
+      });
+    }
+
+    // Key modules
+    const modules = analysis.keyFiles.filter(f => f.classes.length > 0 || f.functions.length > 0).slice(0, 8);
+    if (modules.length > 0) {
+      const modTitleId = nextId();
+      shapes.push({
+        id: modTitleId,
+        type: 'Rectangle',
+        text: 'Key Modules',
+        x: 350,
+        y: 120,
+        width: 250,
+        height: 40,
+        fillColor: '#50C878',
+        strokeColor: '#2E8B57',
+        fontSize: 13,
+      });
+
+      lines.push({
+        id: `line_${shapeId++}`,
+        startShapeId: titleId,
+        endShapeId: modTitleId,
+      });
+
+      modules.forEach((mod, i) => {
+        const modId = nextId();
+        const exports = [...mod.classes, ...mod.functions.slice(0, 3)].join(', ');
+        shapes.push({
+          id: modId,
+          type: 'Rectangle',
+          text: `${mod.path.split('/').pop()}\n${exports.substring(0, 40)}`,
+          x: 350,
+          y: 170 + i * 50,
+          width: 250,
+          height: 45,
+          fillColor: '#50C878',
+          strokeColor: '#2E8B57',
+          fontSize: 10,
+        });
+        lines.push({
+          id: `line_${shapeId++}`,
+          startShapeId: modTitleId,
+          endShapeId: modId,
+        });
+      });
+    }
+
+    // Languages
+    const langEntries = Object.entries(analysis.languages)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 4);
+
+    if (langEntries.length > 0) {
+      const langTitleId = nextId();
+      shapes.push({
+        id: langTitleId,
+        type: 'Rectangle',
+        text: 'Languages',
+        x: 650,
+        y: 120,
+        width: 200,
+        height: 40,
+        fillColor: '#FFD700',
+        strokeColor: '#B8960F',
+        fontSize: 13,
+      });
+
+      lines.push({
+        id: `line_${shapeId++}`,
+        startShapeId: titleId,
+        endShapeId: langTitleId,
+      });
+
+      langEntries.forEach(([lang, bytes], i) => {
+        const langId = nextId();
+        shapes.push({
+          id: langId,
+          type: 'Rectangle',
+          text: lang,
+          x: 650,
+          y: 170 + i * 50,
+          width: 200,
+          height: 45,
+          fillColor: '#FFD700',
+          strokeColor: '#B8960F',
+          fontSize: 11,
+        });
+        lines.push({
+          id: `line_${shapeId++}`,
+          startShapeId: langTitleId,
+          endShapeId: langId,
+        });
+      });
+    }
+
+    return {
+      title: `${analysis.repo.name} - Components`,
+      shapes,
+      lines,
+      metadata: {
+        generatedAt: new Date().toISOString(),
+        repoUrl: analysis.repo.full_name,
+        diagramType: 'components',
+      },
     };
   }
 
@@ -708,6 +1162,7 @@ class LucidDiagramGenerator {
           style: {
             fillColor: s.fillColor,
             strokeColor: s.strokeColor,
+            fontSize: s.fontSize || 12,
           },
         })),
         lines: document.lines.map(l => ({
@@ -743,7 +1198,7 @@ class LucidDiagramAgentServer {
     this.server = new Server(
       {
         name: 'lucid-diagram-agent',
-        version: '1.0.0',
+        version: '2.0.0',
       },
       {
         capabilities: {
@@ -783,7 +1238,7 @@ class LucidDiagramAgentServer {
         },
         {
           name: 'generate_diagram',
-          description: 'Generate a Lucid Chart architecture diagram from a previously analyzed repository',
+          description: 'Generate a Lucid Chart diagram from a previously analyzed repository',
           inputSchema: {
             type: 'object',
             properties: {
@@ -810,6 +1265,12 @@ class LucidDiagramAgentServer {
               repoUrl: {
                 type: 'string',
                 description: 'GitHub repository URL or owner/repo format',
+              },
+              diagramType: {
+                type: 'string',
+                description: 'Type of diagram to generate',
+                enum: ['architecture', 'dependencies', 'components'],
+                default: 'architecture',
               },
             },
             required: ['repoUrl'],
@@ -848,13 +1309,20 @@ class LucidDiagramAgentServer {
         '',
         `**Description:** ${analysis.repo.description || 'No description'}`,
         `**Primary Language:** ${analysis.repo.language}`,
-        `**Stars:** ⭐ ${analysis.repo.stars} | **Forks:** ${analysis.repo.forks}`,
+        `**Stars:** ⭐ ${analysis.repo.stars} | **Forks:** ${analysis.repo.forks} | **Size:** ${analysis.repo.size} KB`,
         `**Topics:** ${analysis.repo.topics.join(', ') || 'None'}`,
+        `**Created:** ${new Date(analysis.repo.created_at).toLocaleDateString()} | **Updated:** ${new Date(analysis.repo.updated_at).toLocaleDateString()}`,
         '',
         '## 🏗️ Architecture',
         `**Type:** ${analysis.architecture.type}`,
         `**Framework:** ${analysis.architecture.framework}`,
         `**Description:** ${analysis.architecture.description}`,
+        `**Patterns:** ${analysis.architecture.patterns.join(', ') || 'None detected'}`,
+        '',
+        '## 📈 Statistics',
+        `**Total Files:** ${analysis.stats.totalFiles}`,
+        `**Files Analyzed:** ${analysis.keyFiles.length}`,
+        `**Estimated Lines:** ${analysis.stats.totalLines.toLocaleString()}`,
         '',
         '## 🔤 Languages',
         ...Object.entries(analysis.languages)
@@ -919,7 +1387,22 @@ class LucidDiagramAgentServer {
 
     try {
       const analysis = await this.githubAnalyzer.analyzeRepo(args.repoUrl);
-      const document = this.lucidGenerator.generateArchitectureDiagram(analysis);
+      const diagramType = args.diagramType || 'architecture';
+      
+      let document: LucidDocument;
+      switch (diagramType) {
+        case 'dependencies':
+          document = this.lucidGenerator.generateDependencyDiagram(analysis);
+          break;
+        case 'components':
+          document = this.lucidGenerator.generateComponentDiagram(analysis);
+          break;
+        case 'architecture':
+        default:
+          document = this.lucidGenerator.generateArchitectureDiagram(analysis);
+          break;
+      }
+      
       const result = await this.lucidGenerator.createLucidDocument(document);
 
       return {
@@ -951,7 +1434,22 @@ class LucidDiagramAgentServer {
 
     try {
       const analysis = await this.githubAnalyzer.analyzeRepo(args.repoUrl);
-      const document = this.lucidGenerator.generateArchitectureDiagram(analysis);
+      const diagramType = args.diagramType || 'architecture';
+      
+      let document: LucidDocument;
+      switch (diagramType) {
+        case 'dependencies':
+          document = this.lucidGenerator.generateDependencyDiagram(analysis);
+          break;
+        case 'components':
+          document = this.lucidGenerator.generateComponentDiagram(analysis);
+          break;
+        case 'architecture':
+        default:
+          document = this.lucidGenerator.generateArchitectureDiagram(analysis);
+          break;
+      }
+      
       const result = await this.lucidGenerator.createLucidDocument(document);
 
       const summary = [
@@ -961,6 +1459,7 @@ class LucidDiagramAgentServer {
         `**Framework:** ${analysis.architecture.framework}`,
         `**Languages:** ${Object.keys(analysis.languages).join(', ')}`,
         `**Dependencies:** ${analysis.dependencies.length}`,
+        `**Patterns:** ${analysis.architecture.patterns.join(', ') || 'None'}`,
         '',
         result,
         '',
@@ -975,6 +1474,7 @@ class LucidDiagramAgentServer {
         '- 📦 Dependencies',
         '- 🚪 Entry Points',
         '- 🧩 Key Modules',
+        '- 🎯 Design Patterns',
       ].join('\n');
 
       return {
@@ -1010,5 +1510,195 @@ class LucidDiagramAgentServer {
   }
 }
 
-const server = new LucidDiagramAgentServer();
-server.run().catch(console.error);
+// ============================================================
+// CLI Interface (for direct usage)
+// ============================================================
+
+class CLI {
+  private analyzer: GitHubAnalyzer;
+  private generator: LucidDiagramGenerator;
+
+  constructor() {
+    this.analyzer = new GitHubAnalyzer();
+    this.generator = new LucidDiagramGenerator();
+  }
+
+  async run(args: string[]) {
+    const command = args[0];
+    const repoUrl = args[1];
+    const diagramType = args[2] || 'architecture';
+
+    if (!command || !repoUrl) {
+      this.showHelp();
+      process.exit(1);
+    }
+
+    try {
+      switch (command) {
+        case 'analyze':
+          await this.analyzeCommand(repoUrl);
+          break;
+        case 'diagram':
+          await this.diagramCommand(repoUrl, diagramType);
+          break;
+        case 'full':
+          await this.fullCommand(repoUrl, diagramType);
+          break;
+        case 'json':
+          await this.jsonCommand(repoUrl, diagramType);
+          break;
+        default:
+          console.error(`Unknown command: ${command}`);
+          this.showHelp();
+          process.exit(1);
+      }
+    } catch (error: any) {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
+    }
+  }
+
+  private showHelp() {
+    console.log(`
+Lucid Diagram Agent - Generate diagrams from GitHub repositories
+
+Usage:
+  node build/index.js <command> <repo-url> [diagram-type]
+
+Commands:
+  analyze   - Analyze repository structure and display information
+  diagram   - Generate a Lucid Chart diagram
+  full      - Analyze and generate diagram (combined)
+  json      - Generate diagram as JSON (no Lucid API needed)
+
+Arguments:
+  repo-url     GitHub repository URL or owner/repo format
+  diagram-type Type of diagram: architecture, dependencies, components (default: architecture)
+
+Examples:
+  node build/index.js analyze facebook/react
+  node build/index.js diagram facebook/react architecture
+  node build/index.js full facebook/react dependencies
+  node build/index.js json facebook/react components
+
+Environment Variables:
+  LUCID_API_KEY  - Lucid Charts API key (optional, for creating diagrams in Lucid)
+  GITHUB_TOKEN   - GitHub personal access token (optional, for higher rate limits)
+
+Note: Without LUCID_API_KEY, diagrams will be output as JSON that can be imported into Lucid Charts.
+    `);
+  }
+
+  private async analyzeCommand(repoUrl: string) {
+    console.error(`Analyzing repository: ${repoUrl}...`);
+    const analysis = await this.analyzer.analyzeRepo(repoUrl);
+    
+    console.log(`\n# 📊 Repository Analysis: ${analysis.repo.full_name}\n`);
+    console.log(`**Description:** ${analysis.repo.description || 'No description'}`);
+    console.log(`**Primary Language:** ${analysis.repo.language}`);
+    console.log(`**Stars:** ⭐ ${analysis.repo.stars} | **Forks:** ${analysis.repo.forks}`);
+    console.log(`**Topics:** ${analysis.repo.topics.join(', ') || 'None'}\n`);
+    
+    console.log('## 🏗️ Architecture');
+    console.log(`**Type:** ${analysis.architecture.type}`);
+    console.log(`**Framework:** ${analysis.architecture.framework}`);
+    console.log(`**Patterns:** ${analysis.architecture.patterns.join(', ') || 'None'}\n`);
+    
+    console.log('## 🔤 Languages');
+    Object.entries(analysis.languages)
+      .sort(([, a], [, b]) => b - a)
+      .forEach(([lang, bytes]) => {
+        const total = Object.values(analysis.languages).reduce((a, b) => a + b, 0);
+        console.log(`- **${lang}:** ${(bytes / total * 100).toFixed(1)}%`);
+      });
+    
+    console.log(`\n## 📦 Dependencies (${analysis.dependencies.length} total)`);
+    analysis.dependencies.slice(0, 10).forEach(dep => {
+      console.log(`- ${dep.name}@${dep.version} (${dep.type})`);
+    });
+    
+    console.log(`\n## 🚪 Entry Points`);
+    analysis.entryPoints.forEach(ep => console.log(`- ${ep}`));
+  }
+
+  private async diagramCommand(repoUrl: string, diagramType: string) {
+    console.error(`Generating ${diagramType} diagram for: ${repoUrl}...`);
+    const analysis = await this.analyzer.analyzeRepo(repoUrl);
+    
+    let document: LucidDocument;
+    switch (diagramType) {
+      case 'dependencies':
+        document = this.generator.generateDependencyDiagram(analysis);
+        break;
+      case 'components':
+        document = this.generator.generateComponentDiagram(analysis);
+        break;
+      default:
+        document = this.generator.generateArchitectureDiagram(analysis);
+    }
+    
+    const result = await this.generator.createLucidDocument(document);
+    console.log(result);
+  }
+
+  private async fullCommand(repoUrl: string, diagramType: string) {
+    console.error(`Analyzing and generating ${diagramType} diagram for: ${repoUrl}...`);
+    const analysis = await this.analyzer.analyzeRepo(repoUrl);
+    
+    let document: LucidDocument;
+    switch (diagramType) {
+      case 'dependencies':
+        document = this.generator.generateDependencyDiagram(analysis);
+        break;
+      case 'components':
+        document = this.generator.generateComponentDiagram(analysis);
+        break;
+      default:
+        document = this.generator.generateArchitectureDiagram(analysis);
+    }
+    
+    const result = await this.generator.createLucidDocument(document);
+    
+    console.log(`\n# ✅ Analysis Complete: ${analysis.repo.full_name}\n`);
+    console.log(`**Architecture:** ${analysis.architecture.type}`);
+    console.log(`**Framework:** ${analysis.architecture.framework}`);
+    console.log(`**Languages:** ${Object.keys(analysis.languages).join(', ')}`);
+    console.log(`**Dependencies:** ${analysis.dependencies.length}\n`);
+    console.log(result);
+  }
+
+  private async jsonCommand(repoUrl: string, diagramType: string) {
+    console.error(`Generating ${diagramType} diagram as JSON for: ${repoUrl}...`);
+    const analysis = await this.analyzer.analyzeRepo(repoUrl);
+    
+    let document: LucidDocument;
+    switch (diagramType) {
+      case 'dependencies':
+        document = this.generator.generateDependencyDiagram(analysis);
+        break;
+      case 'components':
+        document = this.generator.generateComponentDiagram(analysis);
+        break;
+      default:
+        document = this.generator.generateArchitectureDiagram(analysis);
+    }
+    
+    console.log(JSON.stringify(document, null, 2));
+  }
+}
+
+// ============================================================
+// Entry Point
+// ============================================================
+
+const isCLI = process.argv[1] === process.argv[1] && process.argv.length > 1;
+
+if (isCLI && process.argv[2]) {
+  // CLI mode
+  const cli = new CLI();
+  cli.run(process.argv.slice(2)).catch(console.error);
+} else {
+  // MCP server mode
+  const server = new LucidDiagramAgentServer();
+  server.run().catch(console.error);
+}
