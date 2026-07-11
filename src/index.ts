@@ -1723,9 +1723,16 @@ if (isCLI && process.argv[2]) {
   // CLI mode
   const cli = new CLI();
   
-  // If only repo URL is provided (no command), default to full analysis + diagram
-  if (process.argv.length === 3 && !['analyze', 'diagram', 'full', 'json', 'help'].includes(process.argv[2])) {
-    cli.run(['full', process.argv[2], 'architecture']).catch(console.error);
+  // If first argument looks like a repo URL (contains / or starts with http), default to full analysis + diagram
+  const firstArg = process.argv[2];
+  const looksLikeRepoUrl = firstArg.includes('/') || firstArg.startsWith('http');
+  
+  if (looksLikeRepoUrl && !['analyze', 'diagram', 'full', 'json', 'help'].includes(firstArg)) {
+    // Treat as repo URL with optional diagram type and output file
+    const repoUrl = firstArg;
+    const diagramType = process.argv[3] || 'architecture';
+    const outputFile = process.argv[4] || '';
+    cli.run(['full', repoUrl, diagramType, outputFile]).catch(console.error);
   } else {
     cli.run(process.argv.slice(2)).catch(console.error);
   }
