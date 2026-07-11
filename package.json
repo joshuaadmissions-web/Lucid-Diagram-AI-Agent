@@ -1,0 +1,21 @@
+{
+  "name": "lucid-diagram-agent",
+  "version": "1.0.0",
+  "description": "MCP server that analyzes GitHub repositories and generates architecture diagrams in Lucid Charts",
+  "main": "build/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc && chmod +x build/index.js",
+    "start": "node build/index.js",
+    "dev": "tsc --watch"
+  },
+  "keywords": ["lucid", "diagram", "mcp", "github", "architecture"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@types/node": "^22.0.0",
+    "axios": "^1.7.0",
+    "typescript": "^5.7.0"
+  }
+}
