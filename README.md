@@ -36,24 +36,28 @@ npm run build
 
 ### CLI Mode
 
-The agent can be used directly from the command line:
+The agent can be used directly from the command line. **Simply provide a GitHub repository URL and it will automatically analyze and generate an architecture diagram!**
 
 ```bash
-# Analyze a repository
+# Just provide repo URL - automatically analyzes and generates architecture diagram
+node build/index.js facebook/react
+
+# Specify diagram type
+node build/index.js facebook/react dependencies
+
+# Save output to file
+node build/index.js facebook/react architecture ./diagram.json
+
+# Use explicit commands
 node build/index.js analyze facebook/react
-
-# Generate a diagram (requires LUCID_API_KEY for direct creation)
 node build/index.js diagram facebook/react architecture
-
-# Analyze and generate diagram in one step
 node build/index.js full facebook/react dependencies
-
-# Generate diagram as JSON (no API key needed)
 node build/index.js json facebook/react components
 ```
 
 #### CLI Commands
 
+- `(none)` - Just provide repo URL to analyze and generate architecture diagram (default)
 - `analyze <repo-url>` - Analyze repository structure and display information
 - `diagram <repo-url> [type]` - Generate a Lucid Chart diagram
 - `full <repo-url> [type]` - Analyze and generate diagram (combined)
@@ -66,6 +70,7 @@ node build/index.js json facebook/react components
   - `architecture` (default) - Shows project architecture, languages, dependencies, entry points, and key modules
   - `dependencies` - Shows production and development dependencies
   - `components` - Shows entry points, key modules, and languages
+- `output-file` - Optional: File path to save the diagram/JSON output (e.g., `./diagram.json`)
 
 ### MCP Server Mode
 
@@ -105,6 +110,55 @@ The server provides three tools:
 
 ## Examples
 
+### Quick Start - Just Provide a Repo URL
+
+```bash
+$ node build/index.js facebook/react
+
+Analyzing and generating architecture diagram for: facebook/react...
+
+# ✅ Analysis Complete: facebook/react
+
+**Architecture:** SPA (Single Page Application)
+**Framework:** React
+**Languages:** JavaScript, Rust, TypeScript, HTML, CSS, CoffeeScript, Shell
+**Dependencies:** 114
+
+{
+  "title": "react - Architecture Diagram",
+  "shapes": [
+    {
+      "id": "shape_0",
+      "type": "Rectangle",
+      "text": "📦 react\nThe library for web and native user interfaces.",
+      "x": 350,
+      "y": 20,
+      "width": 400,
+      "height": 80,
+      "fillColor": "#4A90D9",
+      "strokeColor": "#2C5F8A",
+      "fontSize": 14
+    },
+    ...
+  ],
+  "lines": [...],
+  "metadata": {
+    "generatedAt": "2024-01-15T10:30:00.000Z",
+    "repoUrl": "facebook/react",
+    "diagramType": "architecture"
+  }
+}
+```
+
+### Save Diagram to File
+
+```bash
+$ node build/index.js facebook/react architecture ./my-diagram.json
+
+Analyzing and generating architecture diagram for: facebook/react...
+Diagram saved to: ./my-diagram.json
+```
+
 ### Analyze a Repository
 
 ```bash
@@ -129,35 +183,17 @@ $ node build/index.js analyze facebook/react
 ...
 ```
 
-### Generate a Diagram as JSON
+### Generate Different Diagram Types
 
 ```bash
-$ node build/index.js json facebook/react architecture
+# Generate dependencies diagram
+$ node build/index.js facebook/react dependencies
 
-{
-  "title": "facebook/react - Architecture Diagram",
-  "shapes": [
-    {
-      "id": "shape_0",
-      "type": "Rectangle",
-      "text": "📦 react\nA declarative, efficient, and flexible JavaScript...",
-      "x": 350,
-      "y": 20,
-      "width": 400,
-      "height": 80,
-      "fillColor": "#4A90D9",
-      "strokeColor": "#2C5F8A",
-      "fontSize": 14
-    },
-    ...
-  ],
-  "lines": [...],
-  "metadata": {
-    "generatedAt": "2024-01-15T10:30:00.000Z",
-    "repoUrl": "facebook/react",
-    "diagramType": "architecture"
-  }
-}
+# Generate components diagram
+$ node build/index.js facebook/react components
+
+# Generate as JSON file
+$ node build/index.js json facebook/react architecture ./diagram.json
 ```
 
 ## How It Works
@@ -184,7 +220,17 @@ $ node build/index.js json facebook/react architecture
 4. **Output**: The diagram can be:
    - Created directly in Lucid Charts (with API key)
    - Exported as JSON for manual import
+   - Saved to a file for later use
    - Displayed in MCP-compatible AI assistants
+
+## Output Options
+
+- **Console output** (default): Diagram JSON is printed to stdout
+- **File output**: Provide a file path as the last argument to save the diagram
+  ```bash
+  node build/index.js facebook/react architecture ./diagram.json
+  ```
+- **Lucid Charts**: Set `LUCID_API_KEY` environment variable to create diagrams directly in Lucid
 
 ## Project Structure
 
