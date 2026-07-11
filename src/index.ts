@@ -1577,12 +1577,18 @@ Commands:
 Arguments:
   repo-url     GitHub repository URL or owner/repo format
   diagram-type Type of diagram: architecture, dependencies, components (default: architecture)
-  output-file  Optional: File path to save the diagram/JSON output
+  output-file  Optional: File path to save the diagram/JSON output (directories will be created automatically)
 
 Examples:
+  # Basic usage - just provide repo URL
   node build/index.js facebook/react
-  node build/index.js facebook/react dependencies
-  node build/index.js facebook/react architecture ./diagram.json
+  
+  # Save to specific folder (folders will be created automatically)
+  node build/index.js facebook/react architecture ./diagrams/react-architecture.json
+  node build/index.js facebook/react dependencies ./diagrams/react-deps.json
+  node build/index.js facebook/react components ./diagrams/react-components.json
+  
+  # Use explicit commands
   node build/index.js analyze facebook/react
   node build/index.js diagram facebook/react architecture ./my-diagram.json
   node build/index.js full facebook/react dependencies ./output.json
@@ -1647,6 +1653,11 @@ Note: Without LUCID_API_KEY, diagrams will be output as JSON that can be importe
     const result = await this.generator.createLucidDocument(document);
     
     if (outputFile) {
+      // Create directory if it doesn't exist
+      const outputDir = path.dirname(outputFile);
+      if (outputDir && outputDir !== '.') {
+        fs.mkdirSync(outputDir, { recursive: true });
+      }
       fs.writeFileSync(outputFile, result, 'utf-8');
       console.log(`Diagram saved to: ${outputFile}`);
     } else {
@@ -1679,6 +1690,11 @@ Note: Without LUCID_API_KEY, diagrams will be output as JSON that can be importe
     console.log(`**Dependencies:** ${analysis.dependencies.length}\n`);
     
     if (outputFile) {
+      // Create directory if it doesn't exist
+      const outputDir = path.dirname(outputFile);
+      if (outputDir && outputDir !== '.') {
+        fs.mkdirSync(outputDir, { recursive: true });
+      }
       fs.writeFileSync(outputFile, result, 'utf-8');
       console.log(`Diagram saved to: ${outputFile}`);
     } else {
@@ -1705,6 +1721,11 @@ Note: Without LUCID_API_KEY, diagrams will be output as JSON that can be importe
     const jsonOutput = JSON.stringify(document, null, 2);
     
     if (outputFile) {
+      // Create directory if it doesn't exist
+      const outputDir = path.dirname(outputFile);
+      if (outputDir && outputDir !== '.') {
+        fs.mkdirSync(outputDir, { recursive: true });
+      }
       fs.writeFileSync(outputFile, jsonOutput, 'utf-8');
       console.log(`JSON diagram saved to: ${outputFile}`);
     } else {
