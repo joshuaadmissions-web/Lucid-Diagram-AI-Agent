@@ -1527,6 +1527,7 @@ class CLI {
     const command = args[0];
     const repoUrl = args[1];
     const diagramType = args[2] || 'architecture';
+    const outputFile = args[3] || '';
 
     if (!command || !repoUrl) {
       this.showHelp();
@@ -1539,13 +1540,13 @@ class CLI {
           await this.analyzeCommand(repoUrl);
           break;
         case 'diagram':
-          await this.diagramCommand(repoUrl, diagramType);
+          await this.diagramCommand(repoUrl, diagramType, outputFile);
           break;
         case 'full':
-          await this.fullCommand(repoUrl, diagramType);
+          await this.fullCommand(repoUrl, diagramType, outputFile);
           break;
         case 'json':
-          await this.jsonCommand(repoUrl, diagramType);
+          await this.jsonCommand(repoUrl, diagramType, outputFile);
           break;
         default:
           console.error(`Unknown command: ${command}`);
@@ -1563,23 +1564,29 @@ class CLI {
 Lucid Diagram Agent - Generate diagrams from GitHub repositories
 
 Usage:
-  node build/index.js <command> <repo-url> [diagram-type]
+  node build/index.js <repo-url> [diagram-type] [output-file]
+  node build/index.js <command> <repo-url> [diagram-type] [output-file]
 
 Commands:
-  analyze   - Analyze repository structure and display information
-  diagram   - Generate a Lucid Chart diagram
-  full      - Analyze and generate diagram (combined)
-  json      - Generate diagram as JSON (no Lucid API needed)
+  (none)       - Analyze and generate architecture diagram (default)
+  analyze      - Analyze repository structure and display information
+  diagram      - Generate a Lucid Chart diagram
+  full         - Analyze and generate diagram (combined)
+  json         - Generate diagram as JSON (no Lucid API needed)
 
 Arguments:
   repo-url     GitHub repository URL or owner/repo format
   diagram-type Type of diagram: architecture, dependencies, components (default: architecture)
+  output-file  Optional: File path to save the diagram/JSON output
 
 Examples:
+  node build/index.js facebook/react
+  node build/index.js facebook/react dependencies
+  node build/index.js facebook/react architecture ./diagram.json
   node build/index.js analyze facebook/react
-  node build/index.js diagram facebook/react architecture
-  node build/index.js full facebook/react dependencies
-  node build/index.js json facebook/react components
+  node build/index.js diagram facebook/react architecture ./my-diagram.json
+  node build/index.js full facebook/react dependencies ./output.json
+  node build/index.js json facebook/react components ./diagram.json
 
 Environment Variables:
   LUCID_API_KEY  - Lucid Charts API key (optional, for creating diagrams in Lucid)
@@ -1621,7 +1628,7 @@ Note: Without LUCID_API_KEY, diagrams will be output as JSON that can be importe
     analysis.entryPoints.forEach(ep => console.log(`- ${ep}`));
   }
 
-  private async diagramCommand(repoUrl: string, diagramType: string) {
+  private async diagramCommand(repoUrl: string, diagramType: string, outputFile: string) {
     console.error(`Generating ${diagramType} diagram for: ${repoUrl}...`);
     const analysis = await this.analyzer.analyzeRepo(repoUrl);
     
@@ -1638,10 +1645,16 @@ Note: Without LUCID_API_KEY, diagrams will be output as JSON that can be importe
     }
     
     const result = await this.generator.createLucidDocument(document);
-    console.log(result);
+    
+    if (outputFile) {
+      fs.writeFileSync(outputFile, result, 'utf-8');
+      console.log(`Diagram saved to: ${outputFile}`);
+    } else {
+      console.log(result);
+    }
   }
 
-  private async fullCommand(repoUrl: string, diagramType: string) {
+  private async fullCommand(repoUrl: string, diagramType: string, outputFile: string) {
     console.error(`Analyzing and generating ${diagramType} diagram for: ${repoUrl}...`);
     const analysis = await this.analyzer.analyzeRepo(repoUrl);
     
@@ -1664,10 +1677,16 @@ Note: Without LUCID_API_KEY, diagrams will be output as JSON that can be importe
     console.log(`**Framework:** ${analysis.architecture.framework}`);
     console.log(`**Languages:** ${Object.keys(analysis.languages).join(', ')}`);
     console.log(`**Dependencies:** ${analysis.dependencies.length}\n`);
-    console.log(result);
+    
+    if (outputFile) {
+      fs.writeFileSync(outputFile, result, 'utf-8');
+      console.log(`Diagram saved to: ${outputFile}`);
+    } else {
+      console.log(result);
+    }
   }
 
-  private async jsonCommand(repoUrl: string, diagramType: string) {
+  private async jsonCommand(repoUrl: string, diagramType: string, outputFile: string) {
     console.error(`Generating ${diagramType} diagram as JSON for: ${repoUrl}...`);
     const analysis = await this.analyzer.analyzeRepo(repoUrl);
     
@@ -1683,7 +1702,14 @@ Note: Without LUCID_API_KEY, diagrams will be output as JSON that can be importe
         document = this.generator.generateArchitectureDiagram(analysis);
     }
     
-    console.log(JSON.stringify(document, null, 2));
+    const jsonOutput = JSON.stringify(document, null, 2);
+    
+    if (outputFile) {
+      fs.writeFileSync(outputFile, jsonOutput, 'utf-8');
+      console.log(`JSON diagram saved to: ${outputFile}`);
+    } else {
+      console.log(jsonOutput);
+    }
   }
 }
 
